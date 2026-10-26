@@ -1,0 +1,105 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>quarry</title>
+<style>
+  :root { --bg: #fbfaf7; --text: #1c1b18; --muted: #6f6a60; --line: #e4e0d6; --accent: #1d4ed8;
+          --mark: #fde68a; --panel: #ffffff; }
+  @media (prefers-color-scheme: dark) {
+    :root { --bg: #141412; --text: #e9e6df; --muted: #9b968b; --line: #2f2d29; --accent: #8ab4ff;
+            --mark: #6b5a12; --panel: #1c1b19; }
+  }
+  * { box-sizing: border-box; }
+  body { margin: 0; background: var(--bg); color: var(--text);
+         font: 15px/1.55 ui-sans-serif, system-ui, -apple-system, "Segoe UI", sans-serif; }
+  main { max-width: 820px; margin: 0 auto; padding: 32px 16px 64px; }
+  h1 { font-size: 20px; margin: 0 0 4px; letter-spacing: .02em; }
+  .sub { color: var(--muted); font-size: 13px; margin-bottom: 18px; }
+  form { display: flex; gap: 8px; }
+  input { flex: 1; font: inherit; padding: 11px 14px; border-radius: 10px; border: 1px solid var(--line);
+          background: var(--panel); color: var(--text); }
+  input:focus { outline: 2px solid var(--accent); outline-offset: -1px; }
+  button { font: inherit; padding: 0 16px; border-radius: 10px; border: 1px solid var(--line);
+           background: var(--panel); color: var(--text); cursor: pointer; }
+  details { color: var(--muted); font-size: 13px; margin: 10px 0 0; }
+  details code { background: var(--panel); border: 1px solid var(--line); border-radius: 4px; padding: 0 4px; }
+  .meta { color: var(--muted); font-size: 13px; margin: 18px 0 8px; font-family: ui-monospace, Menlo, monospace; }
+  .hit { padding: 14px 0; border-top: 1px solid var(--line); }
+  .hit h2 { font-size: 16px; margin: 0 0 4px; font-weight: 600; }
+  .hit .id { color: var(--muted); font-size: 12px; font-family: ui-monospace, Menlo, monospace; }
+  .hit p { margin: 4px 0 0; overflow-wrap: anywhere; }
+  mark { background: var(--mark); color: inherit; border-radius: 2px; padding: 0 1px; }
+  .pager { display: flex; gap: 8px; margin-top: 16px; }
+  .error { color: #b91c1c; }
+</style>
+</head>
+<body>
+<main>
+  <h1>quarry</h1>
+  <div class="sub" id="stats">…</div>
+  <form id="form">
+    <input id="q" placeholder="Search" autofocus autocomplete="off">
+    <button>Search</button>
+  </form>
+  <details>
+    <summary>Query syntax</summary>
+    <p><code>word</code> any field · <code>+must -not</code> · <code>a AND b</code> · <code>"exact phrase"</code>
+      · <code>"near phrase"~3</code> · <code>title:word</code> · <code>pref*</code> · <code>fuzzy~1</code> · <code>word^2</code> boost</p>
+  </details>
+  <div class="meta" id="meta"></div>
+  <div id="results"></div>
+  <div class="pager" id="pager"></div>
+</main>
+<script>
+const $ = id => document.getElementById(id);
+const PAGE = 10;
+let offset = 0;
+
+fetch('/stats').then(r => r.json()).then(s => {
+  $('stats').textContent = `${s.documents.toLocaleString()} documents · ${s.segments.length} segment(s) · ${s.similarity}`;
+});
+
+function escape(t) {
+  return t.replace(/[&<>"]/g, c => ({'&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;'}[c]));
+}
+
+async function search(q, from) {
+  offset = from;
+  history.replaceState(null, '', '?q=' + encodeURIComponent(q) + (from ? '&offset=' + from : ''));
+  const res = await fetch(`/search?q=${encodeURIComponent(q)}&k=${PAGE}&offset=${from}`);
+  const j = await res.json();
+  if (!res.ok) {
+    $('meta').innerHTML = `<span class="error">${escape(j.error)}</span>`;
+    $('results').innerHTML = '';
+    $('pager').innerHTML = '';
+    return;
+  }
+  const total = j.total_is_lower_bound ? '' : ` of ${j.total.toLocaleString()}`;
+  $('meta').textContent = `${from + 1}–${from + j.hits.length}${total} · ${j.took_ms} ms · ${j.query}`;
+  if (!j.hits.length) $('meta').textContent = `no results · ${j.took_ms} ms · ${j.query}`;
+  $('results').innerHTML = j.hits.map(h => {
+    const title = h.highlights.title || escape(h.fields.title || h.id);
+    const body = Object.entries(h.highlights).filter(([f]) => f !== 'title').map(([, s]) => s)[0]
+      || escape(Object.entries(h.fields).filter(([f]) => f !== 'title').map(([, v]) => v)[0] || '').slice(0, 220);
+    return `<div class="hit"><h2>${title}</h2><div class="id">${escape(h.id)} · score ${h.score.toFixed(3)}</div><p>${body}</p></div>`;
+  }).join('');
+  $('pager').innerHTML = (from > 0 ? '<button id="prev">Previous</button>' : '') +
+    (j.hits.length === PAGE ? '<button id="next">Next</button>' : '');
+  if ($('prev')) $('prev').onclick = () => search(q, Math.max(0, from - PAGE));
+  if ($('next')) $('next').onclick = () => search(q, from + PAGE);
+}
+
+$('form').addEventListener('submit', e => {
+  e.preventDefault();
+  if ($('q').value.trim()) search($('q').value.trim(), 0);
+});
+const params = new URLSearchParams(location.search);
+if (params.get('q')) {
+  $('q').value = params.get('q');
+  search(params.get('q'), +(params.get('offset') || 0));
+}
+</script>
+</body>
+</html>
